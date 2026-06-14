@@ -432,7 +432,8 @@ function AdminDashboard({user,onLogout}){
     for(const row of rows){
       const { reg_no, name, groupName } = row;
       if(!reg_no||!name||!groupName){ skipped++; continue; }
-      const grp = SEED_GROUPS.find(g=>g.name.toLowerCase()===groupName.toLowerCase());
+      const normalize = s => s.toLowerCase().replace(/\s+/g,"").replace(/[^a-z0-9]/g,"");
+      const grp = SEED_GROUPS.find(g=>normalize(g.name)===normalize(groupName));
       if(!grp){ errors.push(`Group not found: "${groupName}"`); skipped++; continue; }
       try {
         await db.upsert("students",[{ reg_no, name, group_id:grp.id, department:grp.department, year:grp.year, term:grp.term }]);
@@ -713,9 +714,9 @@ function AdminDashboard({user,onLogout}){
               <div style={{fontSize:11,color:C.muted,fontWeight:700,textTransform:"uppercase",marginBottom:6}}>Preview (first 5 rows)</div>
               <div style={{background:C.bg,borderRadius:8,padding:10,maxHeight:130,overflowY:"auto"}}>
                 {importPreview.slice(0,5).map((r,i)=>(
-                  <div key={i} style={{fontSize:11,fontFamily:"monospace",padding:"3px 0",borderBottom:`1px solid ${C.border}`,color:SEED_GROUPS.find(g=>g.name.toLowerCase()===r.groupName.toLowerCase())?C.text:C.red}}>
+                  <div key={i} style={{fontSize:11,fontFamily:"monospace",padding:"3px 0",borderBottom:`1px solid ${C.border}`,color:(()=>{const norm=s=>s.toLowerCase().replace(/\s+/g,"").replace(/[^a-z0-9]/g,"");return SEED_GROUPS.find(g=>norm(g.name)===norm(r.groupName))?C.text:C.red;})()}}>
                     {r.reg_no} | {r.name} | {r.groupName}
-                    {!SEED_GROUPS.find(g=>g.name.toLowerCase()===r.groupName.toLowerCase())&&<span style={{color:C.red}}> ⚠ Group not found</span>}
+                    {!((s=>SEED_GROUPS.find(g=>s(g.name)===s(r.groupName)))(s=>s.toLowerCase().replace(/\s+/g,"").replace(/[^a-z0-9]/g,"")))&&<span style={{color:C.red}}> ⚠ Group not found</span>}
                   </div>
                 ))}
                 {importPreview.length>5&&<div style={{fontSize:11,color:C.muted,marginTop:4}}>...and {importPreview.length-5} more rows</div>}
