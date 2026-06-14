@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import * as XLSX from "xlsx";
 import { db } from "./supabase.js";
 import { DEPTS, WEEKS, SEED_GROUPS, SEED_UNITS } from "./data.js";
 
@@ -330,6 +331,10 @@ function AdminDashboard({user,onLogout}){
   const [form,setForm]=useState({});
   const [msg,setMsg]=useState(null);
   const [importText,setImportText]=useState("");
+  const [importFile,setImportFile]=useState(null);
+  const [importPreview,setImportPreview]=useState([]);
+  const [importStatus,setImportStatus]=useState("");
+  const [importing,setImporting]=useState(false);
   const [selectedUnit,setSelectedUnit]=useState(null);
   const [unitStudents,setUnitStudents]=useState([]);
 
@@ -387,18 +392,57 @@ function AdminDashboard({user,onLogout}){
     catch(e){ flash(e.message||"Reg no may exist.","error"); }
   };
 
+  const handleExcelUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setImportFile(file);
+    setImportStatus("");
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const wb = XLSX.read(ev.target.result, { type: "binary" });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+        // Filter out empty rows, take first 3 columns
+        const data = rows
+          .filter(r => r[0] && r[1] && r[2])
+          .map(r => ({ reg_no: String(r[0]).trim(), name: String(r[1]).trim(), groupName: String(r[2]).trim() }));
+        setImportPreview(data);
+        setImportStatus(`Found ${data.length} students in file`);
+      } catch(err) {
+        setImportStatus("Error reading file: " + err.message);
+        setImportPreview([]);
+      }
+    };
+    reader.readAsBinaryString(file);
+  };
+
   const bulkImport = async () => {
-    const lines=importText.trim().split("\n").filter(l=>l.trim());
-    let added=0,skipped=0;
-    for(const line of lines){
-      const [reg_no,name,groupName]=line.split(",").map(p=>p.trim());
-      if(!reg_no||!name||!groupName){skipped++;continue;}
-      const grp=groups.find(g=>g.name.toLowerCase()===groupName.toLowerCase());
-      if(!grp){skipped++;continue;}
-      try { await db.upsert("students",[{reg_no,name,group_id:grp.id,department:grp.department,year:grp.year,term:grp.term}]); added++; }
-      catch{skipped++;}
+    // Support both Excel preview and manual text
+    let rows = importPreview;
+    if (!rows.length && importText.trim()) {
+      rows = importText.trim().split("\n").filter(l=>l.trim()).map(line => {
+        const [reg_no, name, groupName] = line.split(",").map(p=>p.trim());
+        return { reg_no, name, groupName };
+      });
     }
-    flash(`Imported ${added}, skipped ${skipped}.`); setImportText(""); setModal(null); load();
+    if (!rows.length) { flash("No data to import.","error"); return; }
+    setImporting(true);
+    let added=0, skipped=0, errors=[];
+    for(const row of rows){
+      const { reg_no, name, groupName } = row;
+      if(!reg_no||!name||!groupName){ skipped++; continue; }
+      const grp = SEED_GROUPS.find(g=>g.name.toLowerCase()===groupName.toLowerCase());
+      if(!grp){ errors.push(`Group not found: "${groupName}"`); skipped++; continue; }
+      try {
+        await db.upsert("students",[{ reg_no, name, group_id:grp.id, department:grp.department, year:grp.year, term:grp.term }]);
+        added++;
+      } catch { skipped++; }
+    }
+    const errMsg = errors.length ? ` (${errors[0]})` : "";
+    flash(`✓ Imported ${added} students. Skipped ${skipped}.${errMsg}`);
+    setImportText(""); setImportFile(null); setImportPreview([]); setImportStatus("");
+    setImporting(false); setModal(null); load();
   };
 
   const saveSemStart = async () => {
@@ -626,11 +670,73 @@ function AdminDashboard({user,onLogout}){
 
       {modal==="import"&&(
         <div className="modal-bg" onClick={()=>setModal(null)}><div className="modal" onClick={e=>e.stopPropagation()}>
-          <h3 style={{marginBottom:8,color:C.accent}}>📥 Bulk Import Students</h3>
-          <p style={{fontSize:12,color:C.muted,marginBottom:8}}>One per line: <code style={{background:C.accentLight,padding:"2px 6px",borderRadius:4}}>REG_NO, Full Name, Exact Group Name</code></p>
-          <div style={{fontSize:11,color:C.muted,marginBottom:10,maxHeight:60,overflowY:"auto"}}>{groups.map(g=><span key={g.id} style={{marginRight:6}}>• {g.name}</span>)}</div>
-          <textarea value={importText} onChange={e=>setImportText(e.target.value)} rows={8} placeholder={"BD3179/GD/MAY/25, Kyle Michuki, KNEC May 2025 (Graphic)"} style={{fontFamily:"monospace",fontSize:12,marginBottom:12}}/>
-          <div style={{display:"flex",gap:10}}><button className="btn-primary" style={{flex:1}} onClick={bulkImport}>Import</button><button className="btn-ghost" onClick={()=>setModal(null)}>Cancel</button></div>
+          <h3 style={{marginBottom:6,color:C.accent}}>📥 Import Students from Excel</h3>
+          <p style={{fontSize:12,color:C.muted,marginBottom:16}}>Your Excel sheet must have 3 columns — no headers needed:</p>
+
+          {/* Column guide */}
+          <div style={{background:C.accentLight,borderRadius:8,padding:"10px 14px",marginBottom:16,fontSize:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 2fr",gap:8,fontWeight:700,color:C.accent,marginBottom:6}}>
+              <span>Column A</span><span>Column B</span><span>Column C</span>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 2fr",gap:8,color:C.text}}>
+              <span>Reg Number</span><span>Full Name</span><span>Exact Group Name</span>
+            </div>
+          </div>
+
+          {/* File upload */}
+          <div style={{border:`2px dashed ${C.border}`,borderRadius:10,padding:20,textAlign:"center",marginBottom:14,background:importFile?C.greenLight:C.bg}}>
+            {!importFile ? (
+              <>
+                <div style={{fontSize:32,marginBottom:8}}>📂</div>
+                <div style={{fontSize:13,color:C.muted,marginBottom:10}}>Click to select your Excel file (.xlsx or .xls)</div>
+                <label style={{background:C.accent,color:"#fff",padding:"8px 20px",borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:700}}>
+                  Choose Excel File
+                  <input type="file" accept=".xlsx,.xls" onChange={handleExcelUpload} style={{display:"none"}}/>
+                </label>
+              </>
+            ) : (
+              <>
+                <div style={{fontSize:32,marginBottom:6}}>✅</div>
+                <div style={{fontSize:13,fontWeight:700,color:C.green,marginBottom:4}}>{importFile.name}</div>
+                <div style={{fontSize:12,color:C.muted,marginBottom:8}}>{importStatus}</div>
+                <label style={{background:C.border,color:C.text,padding:"6px 14px",borderRadius:8,cursor:"pointer",fontSize:12,fontWeight:700}}>
+                  Change File
+                  <input type="file" accept=".xlsx,.xls" onChange={handleExcelUpload} style={{display:"none"}}/>
+                </label>
+              </>
+            )}
+          </div>
+
+          {/* Preview */}
+          {importPreview.length>0&&(
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:11,color:C.muted,fontWeight:700,textTransform:"uppercase",marginBottom:6}}>Preview (first 5 rows)</div>
+              <div style={{background:C.bg,borderRadius:8,padding:10,maxHeight:130,overflowY:"auto"}}>
+                {importPreview.slice(0,5).map((r,i)=>(
+                  <div key={i} style={{fontSize:11,fontFamily:"monospace",padding:"3px 0",borderBottom:`1px solid ${C.border}`,color:SEED_GROUPS.find(g=>g.name.toLowerCase()===r.groupName.toLowerCase())?C.text:C.red}}>
+                    {r.reg_no} | {r.name} | {r.groupName}
+                    {!SEED_GROUPS.find(g=>g.name.toLowerCase()===r.groupName.toLowerCase())&&<span style={{color:C.red}}> ⚠ Group not found</span>}
+                  </div>
+                ))}
+                {importPreview.length>5&&<div style={{fontSize:11,color:C.muted,marginTop:4}}>...and {importPreview.length-5} more rows</div>}
+              </div>
+            </div>
+          )}
+
+          {/* Group name reference */}
+          <details style={{marginBottom:14}}>
+            <summary style={{fontSize:12,color:C.accent,cursor:"pointer",fontWeight:700}}>📋 View all valid group names</summary>
+            <div style={{fontSize:11,color:C.muted,marginTop:8,maxHeight:120,overflowY:"auto",lineHeight:1.8}}>
+              {SEED_GROUPS.map(g=><div key={g.id}>• {g.name}</div>)}
+            </div>
+          </details>
+
+          <div style={{display:"flex",gap:10}}>
+            <button className="btn-primary" style={{flex:1}} onClick={bulkImport} disabled={importing||(!importPreview.length&&!importText.trim())}>
+              {importing?<><Spinner/> Importing…</>:`Import ${importPreview.length||""} Students`}
+            </button>
+            <button className="btn-ghost" onClick={()=>{setModal(null);setImportFile(null);setImportPreview([]);setImportStatus("");}}>Cancel</button>
+          </div>
         </div></div>
       )}
     </div>
