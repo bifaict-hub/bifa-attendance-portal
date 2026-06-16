@@ -433,20 +433,33 @@ function AdminDashboard({user,onLogout}){
     }
     if (!rows.length) { flash("No data to import.","error"); return; }
     setImporting(true);
-    let added=0, skipped=0, errors=[];
+    const normalize = s => s.toLowerCase().replace(/\s+/g,"").replace(/[^a-z0-9]/g,"");
+    let skipped=0, errors=[];
+
+    // Build all valid student records first
+    const toInsert = [];
     for(const row of rows){
       const { reg_no, name, groupName } = row;
       if(!reg_no||!name||!groupName){ skipped++; continue; }
-      const normalize = s => s.toLowerCase().replace(/\s+/g,"").replace(/[^a-z0-9]/g,"");
       const grp = SEED_GROUPS.find(g=>normalize(g.name)===normalize(groupName));
       if(!grp){ errors.push(`Group not found: "${groupName}"`); skipped++; continue; }
-      try {
-        await db.upsert("students",[{ reg_no, name, group_id:grp.id, department:grp.department, year:grp.year, term:grp.term }]);
-        added++;
-      } catch(e) { skipped++; errors.push(e.message); }
+      toInsert.push({ reg_no, name, group_id:grp.id, department:grp.department, year:grp.year, term:grp.term });
     }
-    const errMsg = errors.length ? ` — Error: ${errors[0]}` : "";
-    flash(`Imported ${added}, skipped ${skipped}.${errMsg}`, added>0?"success":"error");
+
+    // Send ALL students in ONE single API call
+    let added = 0;
+    if(toInsert.length > 0){
+      try {
+        const result = await db.upsert("students", toInsert);
+        added = Array.isArray(result) ? result.length : toInsert.length;
+      } catch(e) {
+        skipped += toInsert.length;
+        errors.push(e.message);
+      }
+    }
+
+    const errMsg = errors.length ? ` — ${errors[0]}` : "";
+    flash(`${added>0?"✓":""} Imported ${added} students. Skipped ${skipped}.${errMsg}`, added>0?"success":"error");
     setImportText(""); setImportFile(null); setImportPreview([]); setImportStatus("");
     setImporting(false); setModal(null); load();
   };
